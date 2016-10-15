@@ -1,0 +1,11 @@
+# Generated files
+bin/
+debug/
+dep/
+obj/
+venv/
+env
+icon.xcf
+demo.old.py
+GLYPH.md
+NOTES.md
