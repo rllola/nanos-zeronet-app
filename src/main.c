@@ -25,17 +25,21 @@ enum UI_STATE uiState;
 ux_state_t ux;
 
 unsigned int io_seproxyhal_touch_exit(bagl_element_t *e);
-unsigned int io_seproxyhal_touch_approve(bagl_element_t *e);
+unsigned int io_seproxyhal_touch_confirm(bagl_element_t *e);
 unsigned int io_seproxyhal_touch_deny(bagl_element_t *e);
+unsigned int io_seproxyhal_touch_sign(bagl_element_t *e);
+unsigned int io_seproxyhal_touch_cancel(bagl_element_t *e);
+
 
 void ui_idle(void);
 void ui_creation(void);
-//void ui_sign(void);
+void ui_sign(void);
 
 #define ADDRESS_INDEX 0x00
 
 unsigned int path[5];
 char address[100];
+unsigned char hashTainted;     // notification to restart the hash
 
 #define CLA 0x80
 #define INS_SIGN 0x02 // Sign website update
@@ -54,7 +58,7 @@ zeronet_storage_t N_zeronet_real;
 #define N_zeronet (*(zeronet_storage_t *)PIC(&N_zeronet_real))
 
 //char lineBuffer[50];
-//cx_sha256_t hash;
+cx_sha256_t hash;
 
 
 /*
@@ -215,7 +219,7 @@ ui_confirm_creation_nanos_button(unsigned int button_mask,
     case BUTTON_EVT_RELEASED | BUTTON_RIGHT:
       // TODO : print confirmation of the pubkey creation for 3 secs then
       // back to idle
-        io_seproxyhal_touch_approve(NULL);
+        io_seproxyhal_touch_confirm(NULL);
         break;
 
     case BUTTON_EVT_RELEASED | BUTTON_LEFT:
@@ -225,19 +229,13 @@ ui_confirm_creation_nanos_button(unsigned int button_mask,
     return 0;
 }
 
-unsigned int io_seproxyhal_touch_approve(bagl_element_t *e) {
+unsigned int io_seproxyhal_touch_confirm(bagl_element_t *e) {
     unsigned int tx = 0;
 
     cx_ecfp_public_key_t publicKey;
     cx_ecfp_private_key_t privateKey;
     unsigned char privateKeyData[32];
     unsigned int index = path[4];
-    unsigned char c[4];
-
-    c[0] = index & 0xFF;
-    c[1] = (index>>8) & 0xFF;
-    c[2] = (index>>16) & 0xFF;
-    c[3] = (index>>24) & 0xFF;
 
     os_perso_derive_node_bip32(CX_CURVE_256K1, path, 5, privateKeyData, NULL);
 
@@ -263,6 +261,102 @@ unsigned int io_seproxyhal_touch_approve(bagl_element_t *e) {
 
 unsigned int io_seproxyhal_touch_deny(bagl_element_t *e) {
     //hashTainted = 1;
+    G_io_apdu_buffer[0] = 0x69;
+    G_io_apdu_buffer[1] = 0x85;
+    // Send back the response, do not restart the event loop
+    io_exchange(CHANNEL_APDU | IO_RETURN_AFTER_TX, 2);
+    // Display back the original UX
+    ui_idle();
+    return 0; // do not redraw the widget
+}
+
+const bagl_element_t ui_sign_nanos[] = {
+    // type                               userid    x    y   w    h  str rad
+    // fill      fg        bg      fid iid  txt   touchparams...       ]
+    {{BAGL_RECTANGLE, 0x00, 0, 0, 128, 32, 0, 0, BAGL_FILL, 0x000000, 0xFFFFFF,
+      0, 0},
+     NULL,
+     0,
+     0,
+     0,
+     NULL,
+     NULL,
+     NULL},
+
+    {{BAGL_LABELINE, 0x02, 0, 12, 128, 11, 0, 0, 0, 0xFFFFFF, 0x000000,
+      BAGL_FONT_OPEN_SANS_REGULAR_11px | BAGL_FONT_ALIGNMENT_CENTER, 0},
+     "Update website",
+     0,
+     0,
+     0,
+     NULL,
+     NULL,
+     NULL},
+
+    {{BAGL_ICON, 0x00, 3, 12, 7, 7, 0, 0, 0, 0xFFFFFF, 0x000000, 0,
+      BAGL_GLYPH_ICON_CROSS},
+     NULL,
+     0,
+     0,
+     0,
+     NULL,
+     NULL,
+     NULL},
+    {{BAGL_ICON, 0x00, 117, 13, 8, 6, 0, 0, 0, 0xFFFFFF, 0x000000, 0,
+      BAGL_GLYPH_ICON_CHECK},
+     NULL,
+     0,
+     0,
+     0,
+     NULL,
+     NULL,
+     NULL},
+};
+
+unsigned int ui_sign_nanos_button(unsigned int button_mask,
+                                           unsigned int button_mask_counter) {
+    switch (button_mask) {
+    case BUTTON_EVT_RELEASED | BUTTON_RIGHT:
+        io_seproxyhal_touch_sign(NULL);
+        break;
+
+    case BUTTON_EVT_RELEASED | BUTTON_LEFT:
+        io_seproxyhal_touch_cancel(NULL);
+        break;
+    }
+    return 0;
+}
+
+unsigned int io_seproxyhal_touch_sign(bagl_element_t *e) {
+    unsigned int tx = 0;
+    // Update the hash
+    cx_hash(&hash.header, 0, G_io_apdu_buffer + 5, G_io_apdu_buffer[4], NULL);
+    if (G_io_apdu_buffer[2] == P1_LAST) {
+        // Hash is finalized, send back the signature
+        unsigned char result[32];
+        cx_ecfp_private_key_t privateKey;
+        unsigned char privateKeyData[32];
+        unsigned int index = path[4];
+
+        os_perso_derive_node_bip32(CX_CURVE_256K1, path, 5, privateKeyData, NULL);
+        cx_ecdsa_init_private_key(CX_CURVE_256K1, privateKeyData, 32, &privateKey);
+        cx_hash(&hash.header, CX_LAST, G_io_apdu_buffer, 0, result);
+        tx = cx_ecdsa_sign(&privateKey, CX_RND_RFC6979 | CX_LAST, CX_SHA256,
+                           result, sizeof(result), G_io_apdu_buffer);
+        G_io_apdu_buffer[0] &= 0xF0; // discard the parity information
+        hashTainted = 1;
+    }
+    G_io_apdu_buffer[tx++] = 0x90;
+    G_io_apdu_buffer[tx++] = 0x00;
+    // Send back the response, do not restart the event loop
+    io_exchange(CHANNEL_APDU | IO_RETURN_AFTER_TX, tx);
+    // Display back the original UX
+    ui_idle();
+    return 0; // do not redraw the widget
+}
+
+unsigned int io_seproxyhal_touch_cancel(bagl_element_t *e) {
+    hashTainted = 1;
     G_io_apdu_buffer[0] = 0x69;
     G_io_apdu_buffer[1] = 0x85;
     // Send back the response, do not restart the event loop
@@ -332,32 +426,34 @@ void zeronet_main(void) {
 
                 // unauthenticated instruction
                 switch (G_io_apdu_buffer[1]) {
-                case 0x00: // reset
-                    flags |= IO_RESET_AFTER_REPLIED;
-                    THROW(0x9000);
-                    break;
 
-                case 0x01: // case 1
-                    THROW(0x9000);
-                    break;
+                /*
+                 * Will sign the updates of the website.
+                 */
+                 case INS_SIGN: {
+                     if ((G_io_apdu_buffer[2] != P1_MORE) &&
+                         (G_io_apdu_buffer[2] != P1_LAST)) {
+                         THROW(0x6A86);
+                     }
+                     if (hashTainted) {
+                         cx_sha256_init(&hash);
+                         hashTainted = 0;
+                     }
+                     // Wait for the UI to be completed
+                     G_io_apdu_buffer[5 + G_io_apdu_buffer[4]] = '\0';
 
-                case INS_SIGN: // echo
-                    tx = rx;
-                    THROW(0x9000);
-                    break;
+                     //display_text_part();
+                     ui_sign();
 
+                     flags |= IO_ASYNCH_REPLY;
+                 } break;
+                /*
+                 * Create a new zeronet website.
+                 * Will send pubKey and save increase index.
+                 */
                 case INS_GET_PUBLIC_KEY: {
-                    /*cx_ecfp_public_key_t publicKey;
-                    cx_ecfp_private_key_t privateKey;
-                    os_memmove(&privateKey, &N_privateKey,
-                              sizeof(cx_ecfp_private_key_t));
-                    cx_ecfp_generate_pair(CX_CURVE_256K1, &publicKey,
-                                          &privateKey, 1);
-                    os_memmove(G_io_apdu_buffer, publicKey.W, 65);
-                    tx = 65;
-                    THROW(0x9000);*/
                     ui_creation(); // We ask the user to confirm that he want to
-                                  // a new zeronet website (really necessary ?)
+                                  // a new zeronet website (really necessary ? Yes)
                     flags |= IO_ASYNCH_REPLY;
 
                 } break;
@@ -440,6 +536,8 @@ __attribute__((section(".boot"))) int main(void) {
     // exit critical section
     __asm volatile("cpsie i");
 
+    hashTainted = 1;
+
     UX_INIT();
 
     // ensure exception will work as planned
@@ -452,11 +550,10 @@ __attribute__((section(".boot"))) int main(void) {
             USB_power(0);
             USB_power(1);
 
-            unsigned int index = 0;
             if (!N_zeronet.initialized) {
               bool canary;
+              unsigned int index = 0;
 
-              index = 2 | 0x02;
               nvm_write((void *)&N_zeronet.index, &index, sizeof(index));
               canary = true;
               nvm_write((void *)&N_zeronet.initialized, &canary, sizeof(canary));
@@ -481,11 +578,17 @@ __attribute__((section(".boot"))) int main(void) {
 }
 
 void ui_idle(void) {
-    ui_idle_nanos_state = 0; // start by displaying the idle first screen
+    uiState = UI_IDLE;
+    ui_idle_nanos_state = 0;
     UX_DISPLAY(ui_idle_nanos, ui_idle_nanos_prepro);
 }
 
 void ui_creation(void) {
     uiState = UI_CREATION;
     UX_DISPLAY(ui_confirm_creation_nanos, NULL);
+}
+
+void ui_sign(void) {
+    uiState = UI_SIGN;
+    UX_DISPLAY(ui_sign_nanos, NULL);
 }

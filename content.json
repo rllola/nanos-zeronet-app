@@ -1,0 +1,16 @@
+{
+ "address": "1L5cvujmLEuZqGLncNBThwYGV5DFj8mdPi",
+ "description": "Test test",
+ "files": {
+ },
+ "ignore": "",
+ "inner_path": "content.json",
+ "modified": 1475313829.414413,
+ "postmessage_nonce_security": true,
+ "settings": {
+ },
+ "signers_sign": "HC4cl9KGRQZ+klIIlEBnuF570LvXr2dSvMuLSVMMwH6uYjmV5jeLtfIYy3SjyiYgGsmN00sGnf6cKe89MZx7CuU=",
+ "signs_required": 1,
+ "title": "Ledger Nano S",
+ "zeronet_version": "0.4.1"
+}
