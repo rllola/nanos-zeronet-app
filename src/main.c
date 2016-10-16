@@ -14,6 +14,7 @@
 
 #include "os_io_seproxyhal.h"
 #include "string.h"
+#include <stdbool.h>
 unsigned char G_io_seproxyhal_spi_buffer[IO_SEPROXYHAL_BUFFER_SIZE_B];
 
 // UI currently displayed
@@ -31,16 +32,26 @@ void ui_idle(void);
 void ui_creation(void);
 //void ui_sign(void);
 
+#define ADDRESS_INDEX 0x00
+
+unsigned int path[5];
+char address[100];
+
 #define CLA 0x80
 #define INS_SIGN 0x02 // Sign website update
 #define INS_GET_PUBLIC_KEY 0x04 // Get pubKey for website creation
 #define P1_LAST 0x80
 #define P1_MORE 0x00
 
-const cx_ecfp_private_key_t N_privateKey; // private key in flash. const and N_
-                                          // variable name are mandatory here
-const unsigned char N_initialized; // initialization marker in flash. const and
-                                  // N_ variable name are mandatory here
+typedef struct zeronet_storage_s {
+    bool initialized;
+    unsigned int index;
+
+} zeronet_storage_t;
+
+zeronet_storage_t N_zeronet_real;
+
+#define N_zeronet (*(zeronet_storage_t *)PIC(&N_zeronet_real))
 
 //char lineBuffer[50];
 //cx_sha256_t hash;
@@ -219,12 +230,27 @@ unsigned int io_seproxyhal_touch_approve(bagl_element_t *e) {
 
     cx_ecfp_public_key_t publicKey;
     cx_ecfp_private_key_t privateKey;
-    os_memmove(&privateKey, &N_privateKey,
-              sizeof(cx_ecfp_private_key_t));
+    unsigned char privateKeyData[32];
+    unsigned int index = path[4];
+    unsigned char c[4];
+
+    c[0] = index & 0xFF;
+    c[1] = (index>>8) & 0xFF;
+    c[2] = (index>>16) & 0xFF;
+    c[3] = (index>>24) & 0xFF;
+
+    os_perso_derive_node_bip32(CX_CURVE_256K1, path, 5, privateKeyData, NULL);
+
+    cx_ecdsa_init_private_key(CX_CURVE_256K1, privateKeyData, 32, &privateKey);
     cx_ecfp_generate_pair(CX_CURVE_256K1, &publicKey,
                           &privateKey, 1);
     os_memmove(G_io_apdu_buffer, publicKey.W, 65);
     tx = 65;
+
+    // We increase the index
+    index += 1;
+    path[4] = index;
+    nvm_write((void *)&N_zeronet.index, &index, sizeof(unsigned int));
 
     G_io_apdu_buffer[tx++] = 0x90;
     G_io_apdu_buffer[tx++] = 0x00;
@@ -423,20 +449,24 @@ __attribute__((section(".boot"))) int main(void) {
         TRY {
             io_seproxyhal_init();
 
-            // Create the private key if not initialized
-            if (N_initialized != 0x01) {
-                unsigned char canary;
-                cx_ecfp_private_key_t privateKey;
-                cx_ecfp_public_key_t publicKey;
-                cx_ecfp_generate_pair(CX_CURVE_256K1, &publicKey, &privateKey,
-                                      0);
-                nvm_write(&N_privateKey, &privateKey, sizeof(privateKey));
-                canary = 0x01;
-                nvm_write(&N_initialized, &canary, sizeof(canary));
-            }
-
             USB_power(0);
             USB_power(1);
+
+            unsigned int index = 0;
+            if (!N_zeronet.initialized) {
+              bool canary;
+
+              index = 2 | 0x02;
+              nvm_write((void *)&N_zeronet.index, &index, sizeof(index));
+              canary = true;
+              nvm_write((void *)&N_zeronet.initialized, &canary, sizeof(canary));
+            }
+
+            path[0] = 44 | 0x80000000;
+            path[1] = 0 | 0x80000000;
+            path[2] = 0 | 0x80000000;
+            path[3] = 0;
+            path[4] = N_zeronet.index;
 
             ui_idle();
 
